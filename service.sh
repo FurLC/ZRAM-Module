@@ -16,14 +16,27 @@ log "======================================="
 if [ -f "$CONFIG_FILE" ]; then
     . "$CONFIG_FILE"
 else
+    log "配置文件缺失，使用默认值"
     ZRAM_ALGO="lz4"
     ZRAM_SIZE="8589934592"
 fi
 
 log "读取配置: ZRAM_ALGO=$ZRAM_ALGO, ZRAM_SIZE=$ZRAM_SIZE"
 log "=== ZRAM-Module 服务启动 ==="
-log "等待系统初始化完成..."
-sleep 30
+
+# ---------- 等待 zram0 设备出现（轮询替代盲等）----------
+log "等待 zram0 设备出现..."
+i=0
+while [ ! -b /dev/block/zram0 ] && [ $i -lt 60 ]; do
+  sleep 1
+  i=$((i+1))
+done
+
+if [ ! -b /dev/block/zram0 ]; then
+  log "zram0 设备在 60 秒内未出现，服务终止"
+  exit 1
+fi
+log "zram0 已就绪（等待 ${i} 秒）"
 
 log "加载zstdn.ko..."
 if insmod $MODDIR/zram/zstdn.ko 2>>"$LOG_FILE"; then
@@ -43,35 +56,29 @@ log "rmmod zram"
 if rmmod zram 2>>"$LOG_FILE"; then
   log "rmmod zram 成功"
 else
-  log "rmmod zram 失败或为内建"
+  log "rmmod zram 失败或为内建模块，继续尝试"
 fi
 
 log "等待5秒..."
 sleep 5
 
 log "insmod zram.ko"
-if insmod $MODDIR/zram/zram.ko 2>>"$LOG_FILE"; then
-  log "zram.ko 加载成功"
-else
-  log "zram.ko 加载失败"
+if ! insmod $MODDIR/zram/zram.ko 2>>"$LOG_FILE"; then
+  log "zram.ko 加载失败，服务终止"
+  exit 1
 fi
+log "zram.ko 加载成功"
 
 log "等待5秒..."
 sleep 5
 
+# ---------- 配置 zram0 ----------
 log "zram0 reset"
-if echo '1' > /sys/block/zram0/reset 2>>"$LOG_FILE"; then
-  log "zram0 reset 成功"
-else
-  log "zram0 reset 失败"
+if ! echo '1' > /sys/block/zram0/reset 2>>"$LOG_FILE"; then
+  log "zram0 reset 失败，服务终止"
+  exit 1
 fi
-
-log "zram0 disksize 0"
-if echo '0' > /sys/block/zram0/disksize 2>>"$LOG_FILE"; then
-  log "zram0 disksize 清零成功"
-else
-  log "zram0 disksize 清零失败（可忽略）"
-fi
+log "zram0 reset 成功"
 
 log "zram0 max_comp_streams 8"
 if echo '8' > /sys/block/zram0/max_comp_streams 2>>"$LOG_FILE"; then
@@ -88,18 +95,18 @@ else
 fi
 
 log "zram0 disksize $ZRAM_SIZE"
-if echo "$ZRAM_SIZE" > /sys/block/zram0/disksize 2>>"$LOG_FILE"; then
-  log "zram0 disksize 设置成功"
-else
-  log "zram0 disksize 设置失败"
+if ! echo "$ZRAM_SIZE" > /sys/block/zram0/disksize 2>>"$LOG_FILE"; then
+  log "zram0 disksize 设置失败，服务终止"
+  exit 1
 fi
+log "zram0 disksize 设置成功"
 
 log "mkswap /dev/block/zram0"
-if mkswap /dev/block/zram0 > /dev/null 2>>"$LOG_FILE"; then
-  log "mkswap 成功"
-else
-  log "mkswap 失败"
+if ! mkswap /dev/block/zram0 > /dev/null 2>>"$LOG_FILE"; then
+  log "mkswap 失败，服务终止"
+  exit 1
 fi
+log "mkswap 成功"
 
 log "swapon /dev/block/zram0"
 if swapon /dev/block/zram0 > /dev/null 2>>"$LOG_FILE"; then
@@ -108,8 +115,8 @@ else
   log "swapon 失败"
 fi
 
-# ------------- 重点优化：最后再清理多余zram设备 -------------
-log "=== 最后清理多余zram设备（zram1/zram2…） ==="
+# ---------- 清理多余 zram 设备 ----------
+log "=== 清理多余zram设备（zram1/zram2…） ==="
 for zdev in /dev/block/zram*; do
   [ "$zdev" = "/dev/block/zram0" ] && continue
   [ -b "$zdev" ] || continue
@@ -127,7 +134,7 @@ for zdev in /dev/block/zram*; do
 done
 log "多余zram设备清理完成"
 
-# --------- ZRAM与内存状态日志 ---------
+# ---------- 状态日志 ----------
 log "--------- ZRAM与内存状态 ---------"
 log "zram0 当前支持算法: $(cat /sys/block/zram0/comp_algorithm 2>/dev/null)"
 
