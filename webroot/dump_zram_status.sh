@@ -22,7 +22,6 @@ else
   ratio="N/A"
 fi
 
-# 原子写入：先写临时文件再 mv，避免前端读到半截 JSON
 cat <<EOF > "$TMP_FILE"
 {
   "algorithm": "${algorithm:-未知}",
